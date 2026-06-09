@@ -68,6 +68,7 @@ class DFlashQwen3Attention(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
+        sliding_window: int | None = None,
     ) -> None:
         super().__init__()
         self.layer_name = prefix
@@ -116,6 +117,7 @@ class DFlashQwen3Attention(nn.Module):
             num_kv_heads=self.num_kv_heads,
             cache_config=cache_config,
             quant_config=quant_config,
+            per_layer_sliding_window=sliding_window,
             prefix=f"{prefix}.attn",
             attn_type=attn_type,
         )
@@ -156,6 +158,7 @@ class DFlashQwen3DecoderLayer(nn.Module):
         vllm_config: VllmConfig,
         *,
         config: Qwen3Config,
+        layer_idx: int = 0,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -164,6 +167,13 @@ class DFlashQwen3DecoderLayer(nn.Module):
         self.hidden_size = config.hidden_size
         set_default_rope_theta(config, default_theta=1000000)
         attn_type = AttentionType.DECODER
+
+        sliding_window: int | None = None
+        if (
+            (layer_types := getattr(config, "layer_types", None))
+            and layer_types[layer_idx] == "sliding_attention"
+        ):
+            sliding_window = getattr(config, "sliding_window", None)
 
         self.self_attn = DFlashQwen3Attention(
             hidden_size=self.hidden_size,
@@ -178,6 +188,7 @@ class DFlashQwen3DecoderLayer(nn.Module):
             rope_parameters=config.rope_parameters,
             prefix=f"{prefix}.self_attn",
             attn_type=attn_type,
+            sliding_window=sliding_window,
         )
         self.mlp = Qwen3MLP(
             hidden_size=self.hidden_size,
@@ -248,6 +259,7 @@ class DFlashQwen3Model(nn.Module):
                 DFlashQwen3DecoderLayer(
                     current_vllm_config,
                     config=self.config,
+                    layer_idx=layer_idx,
                     cache_config=current_vllm_config.cache_config,
                     quant_config=self.quant_config,
                     prefix=maybe_prefix(prefix, f"layers.{layer_idx + start_layer_id}"),

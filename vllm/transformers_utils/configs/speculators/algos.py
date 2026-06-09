@@ -99,8 +99,21 @@ def update_dflash(config_dict: dict, pre_trained_config: dict) -> None:
     aux_layer_ids = config_dict["aux_hidden_state_layer_ids"]
     pre_trained_config["eagle_aux_hidden_state_layer_ids"] = aux_layer_ids
 
+    # Forward transformer_layer_config fields needed for per-layer SWA
+    tlc = config_dict.get("transformer_layer_config", {})
+    if "layer_types" in tlc:
+        pre_trained_config["layer_types"] = tlc["layer_types"]
+    if "sliding_window" in tlc:
+        pre_trained_config["sliding_window"] = tlc["sliding_window"]
+
     # DFlash configs use different indexing for the target layers, see #40727
-    pre_trained_config["dflash_config"] = {
+    dflash_config: dict = {
         "mask_token_id": config_dict["mask_token_id"],
         "target_layer_ids": [i - 1 for i in aux_layer_ids],
     }
+
+    sliding_window_non_causal = config_dict.get("sliding_window_non_causal")
+    if sliding_window_non_causal is not None:
+        dflash_config["sliding_window_non_causal"] = sliding_window_non_causal
+
+    pre_trained_config["dflash_config"] = dflash_config

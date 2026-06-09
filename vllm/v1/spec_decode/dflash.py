@@ -68,7 +68,7 @@ class DFlashProposer(SpecDecodeBaseProposer):
         # For DFlash we use the input embeddings to embed the mask token
         self.parallel_drafting_hidden_state_tensor = None
 
-        self.dflash_causal = self.dflash_config.get("causal", False)
+        self.dflash_causal = self._resolve_dflash_causal()
 
     @override
     def _create_draft_vllm_config(self) -> VllmConfig:
@@ -300,3 +300,30 @@ class DFlashProposer(SpecDecodeBaseProposer):
     @property
     def dflash_config(self):
         return getattr(self.draft_model_config.hf_config, "dflash_config", None) or {}
+
+    def _resolve_dflash_causal(self) -> bool:
+        swa_non_causal = self.dflash_config.get("sliding_window_non_causal")
+        if swa_non_causal is None:
+            return self.dflash_config.get("causal", False)
+
+        hf_config = self.draft_model_config.hf_config
+        layer_types = getattr(hf_config, "layer_types", None)
+        if not layer_types:
+            return not swa_non_causal
+
+        has_sliding = any(lt == "sliding_attention" for lt in layer_types)
+        has_full = any(lt != "sliding_attention" for lt in layer_types)
+
+        if has_sliding and not has_full:
+            return not swa_non_causal
+        if has_full and not has_sliding:
+            return False
+
+        # Mixed layer types need per-layer causality (not yet supported).
+        # Default to non-causal (standard DFlash behavior).
+        logger.warning(
+            "DFlash model has mixed sliding/full attention layer types "
+            "with different causality requirements. Per-layer causality "
+            "is not yet supported; defaulting to non-causal."
+        )
+        return False
