@@ -54,8 +54,8 @@ class SpecDecodingStats:
 class SpecDecodeRequestStats:
     """Per-request speculative decoding statistics.
 
-    Accumulated across all scheduler steps for a single request,
-    then attached to EngineCoreOutput on request finish.
+    Accumulated across scheduler steps via merge(). Compatible with
+    the per-request stats infrastructure from PR #44487.
     """
 
     num_draft_tokens: int = 0
@@ -66,21 +66,71 @@ class SpecDecodeRequestStats:
     per_step_accepted: list[int] = field(default_factory=list)
     per_step_drafted: list[int] = field(default_factory=list)
 
-    def observe(
-        self, num_draft_tokens: int, num_accepted_tokens: int, num_spec_tokens: int
-    ):
-        self.num_steps += 1
-        self.num_draft_tokens += num_draft_tokens
-        self.num_accepted_tokens += num_accepted_tokens
-        self.per_step_accepted.append(num_accepted_tokens)
-        self.per_step_drafted.append(num_draft_tokens)
-        if not self.num_accepted_per_pos:
-            self.num_accepted_per_pos = [0] * num_spec_tokens
-            self.num_drafted_per_pos = [0] * num_spec_tokens
+    @property
+    def acceptance_rate(self) -> float:
+        if self.num_draft_tokens == 0:
+            return float("nan")
+        return self.num_accepted_tokens / self.num_draft_tokens
+
+    @classmethod
+    def from_step(
+        cls,
+        num_draft_tokens: int,
+        num_accepted_tokens: int,
+        num_spec_tokens: int,
+    ) -> "SpecDecodeRequestStats":
+        accepted_per_pos = [0] * num_spec_tokens
+        drafted_per_pos = [0] * num_spec_tokens
         for i in range(num_accepted_tokens):
-            self.num_accepted_per_pos[i] += 1
+            accepted_per_pos[i] += 1
         for i in range(num_draft_tokens):
-            self.num_drafted_per_pos[i] += 1
+            drafted_per_pos[i] += 1
+        return cls(
+            num_draft_tokens=num_draft_tokens,
+            num_accepted_tokens=num_accepted_tokens,
+            num_steps=1,
+            num_accepted_per_pos=accepted_per_pos,
+            num_drafted_per_pos=drafted_per_pos,
+            per_step_accepted=[num_accepted_tokens],
+            per_step_drafted=[num_draft_tokens],
+        )
+
+    def merge(
+        self, other: "SpecDecodeRequestStats | None"
+    ) -> "SpecDecodeRequestStats":
+        if other is None:
+            return self
+        merged_accepted_per_pos = [
+            a + b
+            for a, b in zip(self.num_accepted_per_pos,
+                             other.num_accepted_per_pos)
+        ] if self.num_accepted_per_pos and other.num_accepted_per_pos else (
+            self.num_accepted_per_pos or other.num_accepted_per_pos
+        )
+        merged_drafted_per_pos = [
+            a + b
+            for a, b in zip(self.num_drafted_per_pos,
+                             other.num_drafted_per_pos)
+        ] if self.num_drafted_per_pos and other.num_drafted_per_pos else (
+            self.num_drafted_per_pos or other.num_drafted_per_pos
+        )
+        return SpecDecodeRequestStats(
+            num_draft_tokens=(
+                self.num_draft_tokens + other.num_draft_tokens
+            ),
+            num_accepted_tokens=(
+                self.num_accepted_tokens + other.num_accepted_tokens
+            ),
+            num_steps=self.num_steps + other.num_steps,
+            num_accepted_per_pos=merged_accepted_per_pos,
+            num_drafted_per_pos=merged_drafted_per_pos,
+            per_step_accepted=(
+                self.per_step_accepted + other.per_step_accepted
+            ),
+            per_step_drafted=(
+                self.per_step_drafted + other.per_step_drafted
+            ),
+        )
 
     def to_dict(self, detailed: bool = False) -> dict[str, Any]:
         acceptance_rate = (
@@ -89,19 +139,27 @@ class SpecDecodeRequestStats:
             else 0.0
         )
         mean_accepted_length = (
-            1 + self.num_accepted_tokens / self.num_steps if self.num_steps > 0 else 0.0
+            1 + self.num_accepted_tokens / self.num_steps
+            if self.num_steps > 0
+            else 0.0
         )
         per_pos_rates = [
             a / d if d > 0 else 0.0
-            for a, d in zip(self.num_accepted_per_pos, self.num_drafted_per_pos)
+            for a, d in zip(
+                self.num_accepted_per_pos, self.num_drafted_per_pos
+            )
         ]
         result: dict[str, Any] = {
             "num_drafted_tokens": self.num_draft_tokens,
             "num_accepted_tokens": self.num_accepted_tokens,
             "draft_acceptance_rate": round(acceptance_rate, 4),
             "num_draft_steps": self.num_steps,
-            "mean_accepted_length_per_step": round(mean_accepted_length, 2),
-            "per_position_acceptance_rates": [round(r, 4) for r in per_pos_rates],
+            "mean_accepted_length_per_step": round(
+                mean_accepted_length, 2
+            ),
+            "per_position_acceptance_rates": [
+                round(r, 4) for r in per_pos_rates
+            ],
         }
         if detailed:
             result["per_step_accepted"] = self.per_step_accepted

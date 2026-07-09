@@ -1598,24 +1598,22 @@ class Scheduler(SchedulerInterface):
                 # the scheduled spec tokens count and so is similarly adjusted.
                 if request.num_output_placeholders > 0:
                     request.num_output_placeholders -= num_rejected
-                spec_decoding_stats = self.make_spec_decoding_stats(
-                    spec_decoding_stats,
-                    num_draft_tokens=num_draft_tokens,
-                    num_accepted_tokens=num_accepted,
-                    num_invalid_spec_tokens=scheduler_output.num_invalid_spec_tokens,
-                    request_id=req_id,
-                )
-
-                effective_draft = num_draft_tokens
-                if scheduler_output.num_invalid_spec_tokens:
-                    effective_draft -= scheduler_output.num_invalid_spec_tokens.get(
-                        req_id, 0
+                spec_decoding_stats, spec_decode_request_stats = (
+                    self.make_spec_decoding_stats(
+                        spec_decoding_stats,
+                        num_draft_tokens=num_draft_tokens,
+                        num_accepted_tokens=num_accepted,
+                        num_invalid_spec_tokens=(
+                            scheduler_output.num_invalid_spec_tokens
+                        ),
+                        request_id=req_id,
                     )
-                if effective_draft > 0:
-                    if request.spec_decode_stats is None:
-                        request.spec_decode_stats = SpecDecodeRequestStats()
-                    request.spec_decode_stats.observe(
-                        effective_draft, num_accepted, self.num_spec_tokens
+                )
+                if spec_decode_request_stats is not None:
+                    request.spec_decode_stats = (
+                        spec_decode_request_stats.merge(
+                            request.spec_decode_stats
+                        )
                     )
 
             # Free encoder inputs only after the step has actually executed.
@@ -2319,17 +2317,35 @@ class Scheduler(SchedulerInterface):
         num_accepted_tokens: int,
         num_invalid_spec_tokens: dict[str, int] | None,
         request_id: str,
-    ) -> SpecDecodingStats | None:
-        if not self.log_stats or not num_draft_tokens:
-            return None
-        if spec_decoding_stats is None:
-            spec_decoding_stats = SpecDecodingStats.new(self.num_spec_tokens)
+    ) -> tuple[
+        SpecDecodingStats | None, SpecDecodeRequestStats | None
+    ]:
+        if not num_draft_tokens:
+            return spec_decoding_stats, None
+        effective_draft = num_draft_tokens
         if num_invalid_spec_tokens:
-            num_draft_tokens -= num_invalid_spec_tokens.get(request_id, 0)
-        spec_decoding_stats.observe_draft(
-            num_draft_tokens=num_draft_tokens, num_accepted_tokens=num_accepted_tokens
+            effective_draft -= num_invalid_spec_tokens.get(
+                request_id, 0
+            )
+        if self.log_stats:
+            if spec_decoding_stats is None:
+                spec_decoding_stats = SpecDecodingStats.new(
+                    self.num_spec_tokens
+                )
+            spec_decoding_stats.observe_draft(
+                num_draft_tokens=effective_draft,
+                num_accepted_tokens=num_accepted_tokens,
+            )
+        request_stats = (
+            SpecDecodeRequestStats.from_step(
+                num_draft_tokens=effective_draft,
+                num_accepted_tokens=num_accepted_tokens,
+                num_spec_tokens=self.num_spec_tokens,
+            )
+            if effective_draft > 0
+            else None
         )
-        return spec_decoding_stats
+        return spec_decoding_stats, request_stats
 
     def shutdown(self) -> None:
         logger.debug_once("[shutdown] Scheduler: start")
